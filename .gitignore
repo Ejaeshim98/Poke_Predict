@@ -1,0 +1,28 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# IDE/editor
+.vscode/
+.idea/
+.cursor/
+
+# Logs
+*.log
+
+# Environment / secrets
+.env
+*.env
+
+# Local data exports (avoid committing)
+*.csv
+*.xlsx
+*.parquet
+data/
+downloads/
+
