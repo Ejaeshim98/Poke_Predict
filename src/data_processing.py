@@ -40,6 +40,46 @@ def map_tcgcsv_schema(df: pd.DataFrame) -> pd.DataFrame:
     return work
 
 
+def map_alias_schema(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Best-effort mapping for CSVs that use different column names.
+    """
+    alias_map = {
+        "date": ["date", "datetime", "timestamp", "modifiedOn", "updated_at"],
+        "card_name": ["card_name", "name", "product_name", "title"],
+        "set_name": ["set_name", "set", "expansion", "setCode", "group_name"],
+        "card_number": ["card_number", "number", "collector_number", "extNumber"],
+        "condition": ["condition", "subTypeName", "card_condition"],
+        "price": ["price", "marketPrice", "market_price", "midPrice", "last_sold_price"],
+        "variant": ["variant", "extRarity", "rarity", "print_variant"],
+        "expansion_code": ["expansion_code", "set_code", "groupId"],
+    }
+
+    work = df.copy()
+    cols_lower = {c.lower(): c for c in work.columns}
+
+    def pick(alias_list: list[str]) -> str | None:
+        for a in alias_list:
+            if a in work.columns:
+                return a
+            if a.lower() in cols_lower:
+                return cols_lower[a.lower()]
+        return None
+
+    for target, aliases in alias_map.items():
+        if target in work.columns:
+            continue
+        source = pick(aliases)
+        if source:
+            work[target] = work[source]
+
+    # Reasonable default when condition is missing in source data.
+    if "condition" not in work.columns:
+        work["condition"] = "normal"
+
+    return work
+
+
 def normalize_variant(value: str) -> str:
     if not isinstance(value, str):
         return "unknown"
@@ -100,11 +140,45 @@ def has_valid_card_number(value: str) -> bool:
     return any(re.match(p, v) for p in patterns)
 
 
-def prepare_data(df: pd.DataFrame) -> pd.DataFrame:
+def looks_like_pokemon_card_row(df: pd.DataFrame) -> pd.Series:
+    """
+    Heuristic for TCGCSV exports: Pokemon cards usually contain Pokemon-specific
+    stat fields like HP, stage, and attacks.
+    """
+    candidate_cols = [
+        "extHP",
+        "extStage",
+        "extAttack1",
+        "extAttack2",
+        "extWeakness",
+        "extResistance",
+        "extRetreatCost",
+    ]
+    present = [c for c in candidate_cols if c in df.columns]
+    if not present:
+        # If we don't have any Pokemon-specific columns, don't filter.
+        return pd.Series([True] * len(df), index=df.index)
+
+    mask = pd.Series(False, index=df.index)
+    for c in present:
+        col = df[c]
+        if col.dtype == object:
+            mask = mask | col.astype(str).str.strip().ne("")
+        else:
+            # Numeric columns: keep non-null values
+            mask = mask | col.notna()
+    return mask
+
+
+def prepare_data(df: pd.DataFrame, *, pokemon_only: bool = True) -> pd.DataFrame:
+    df = map_alias_schema(df)
     df = map_tcgcsv_schema(df)
 
     # Keep only expected columns plus known optional fields.
     keep_cols = [c for c in REQUIRED_COLUMNS + OPTIONAL_COLUMNS if c in df.columns]
+    if pokemon_only:
+        df = df[looks_like_pokemon_card_row(df)].copy()
+
     work = df[keep_cols].copy()
 
     work["date"] = pd.to_datetime(work["date"], errors="coerce")

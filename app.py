@@ -6,8 +6,10 @@ import pandas as pd
 import streamlit as st
 
 from src.config import REQUIRED_COLUMNS, VALID_GRANULARITIES
+from src.env_loader import load_env
 from src.data_processing import (
     aggregate_granularity,
+    map_alias_schema,
     map_tcgcsv_schema,
     prepare_data,
     remove_outliers_iqr,
@@ -15,6 +17,8 @@ from src.data_processing import (
 )
 from src.forecasting import forecast_all
 from src.ranking import top_10_unique_cards
+
+load_env()
 
 st.set_page_config(page_title="Pokemon Card Price Forecast", layout="wide")
 st.title("Pokemon Card Market Forecast")
@@ -27,6 +31,7 @@ with st.sidebar:
     granularity = st.selectbox("Granularity", options=sorted(VALID_GRANULARITIES), index=0)
     horizon = st.slider("Forecast horizon", min_value=7, max_value=30, value=30, step=1)
     apply_outlier_filter = st.checkbox("Enable outlier filtering (IQR)", value=True)
+    pokemon_only = st.checkbox("Pokemon-only filter", value=True)
 
     st.markdown("### Expected CSV columns")
     st.code(", ".join(REQUIRED_COLUMNS))
@@ -39,7 +44,8 @@ if not uploaded_file:
     st.stop()
 
 raw = pd.read_csv(uploaded_file)
-mapped_raw = map_tcgcsv_schema(raw)
+mapped_raw = map_alias_schema(raw)
+mapped_raw = map_tcgcsv_schema(mapped_raw)
 
 # For TCGCSV product exports, keep likely physical cards and exclude code card listings.
 if "extCardType" in raw.columns:
@@ -50,9 +56,11 @@ if "extCardType" in raw.columns:
 missing = validate_columns(mapped_raw)
 if missing:
     st.error(f"Missing required columns: {missing}")
+    st.caption("Detected CSV columns:")
+    st.code(", ".join(raw.columns.astype(str).tolist()))
     st.stop()
 
-data = prepare_data(mapped_raw)
+data = prepare_data(mapped_raw, pokemon_only=pokemon_only)
 st.subheader("Data Quality")
 col1, col2, col3 = st.columns(3)
 col1.metric("Rows loaded", f"{len(raw):,}")
