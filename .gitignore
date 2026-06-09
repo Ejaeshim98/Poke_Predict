@@ -26,3 +26,8 @@ __pycache__/
 data/
 downloads/
 
+# PyInstaller output
+build/
+dist/
+*.spec
+

@@ -13,6 +13,7 @@ if __name__ == "__main__":
         "app.py",
         "--server.headless=false",
         "--server.port=8501",
+        "--browser.serverAddress=localhost",
         "--browser.gatherUsageStats=false",
     ]
     raise SystemExit(stcli.main())

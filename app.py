@@ -6,16 +6,16 @@ import pandas as pd
 import streamlit as st
 
 from src.config import REQUIRED_COLUMNS, VALID_GRANULARITIES
-from src.env_loader import load_env
+from src.env_loader import get_env, load_env
 from src.data_processing import (
     aggregate_granularity,
-    map_alias_schema,
-    map_tcgcsv_schema,
+    normalize_csv_schema,
     prepare_data,
     remove_outliers_iqr,
     validate_columns,
 )
 from src.forecasting import forecast_all
+from src.ingest_api import enrich_catalog_with_prices, fetch_pokemon_prices_snapshot, has_api_credentials
 from src.ranking import top_10_unique_cards
 
 load_env()
@@ -23,35 +23,89 @@ load_env()
 st.set_page_config(page_title="Pokemon Card Price Forecast", layout="wide")
 st.title("Pokemon Card Market Forecast")
 st.caption(
-    "Upload CSV data and forecast top 10 unique cards over a 30-day window."
+    "Upload CSV data or fetch live Pokemon prices, then forecast top 10 unique cards."
 )
 
 with st.sidebar:
     st.header("Configuration")
+    data_source = st.radio(
+        "Data source",
+        options=["Upload CSV", "Fetch from TCGplayer API"],
+        index=0,
+    )
     granularity = st.selectbox("Granularity", options=sorted(VALID_GRANULARITIES), index=0)
     horizon = st.slider("Forecast horizon", min_value=7, max_value=30, value=30, step=1)
     apply_outlier_filter = st.checkbox("Enable outlier filtering (IQR)", value=True)
     pokemon_only = st.checkbox("Pokemon-only filter", value=True)
 
+    if data_source == "Fetch from TCGplayer API":
+        api_limit = st.slider("Products to fetch", min_value=50, max_value=500, value=250, step=50)
+        if not has_api_credentials():
+            st.error("Add TCGPLAYER_PUBLIC_KEY and TCGPLAYER_PRIVATE_KEY to your .env file.")
+        else:
+            st.success("API credentials detected.")
+
     st.markdown("### Expected CSV columns")
     st.code(", ".join(REQUIRED_COLUMNS))
-    st.caption("Optional columns: variant, expansion_code")
+    st.caption("Optional columns: variant, expansion_code, tcgplayer_id")
 
-uploaded_file = st.file_uploader("Upload card price CSV", type=["csv"])
+raw = pd.DataFrame()
+mapped_raw = pd.DataFrame()
 
-if not uploaded_file:
-    st.info("Upload a CSV to begin.")
-    st.stop()
+if data_source == "Upload CSV":
+    uploaded_file = st.file_uploader("Upload card price CSV", type=["csv"])
+    if not uploaded_file:
+        st.info("Upload a CSV to begin.")
+        st.stop()
+    raw = pd.read_csv(uploaded_file)
+    mapped_raw = normalize_csv_schema(raw)
 
-raw = pd.read_csv(uploaded_file)
-mapped_raw = map_alias_schema(raw)
-mapped_raw = map_tcgcsv_schema(mapped_raw)
+    if "extCardType" in raw.columns:
+        non_empty_card_type = raw["extCardType"].astype(str).str.strip().ne("")
+        not_code_card = ~mapped_raw["card_name"].astype(str).str.contains("code card", case=False, na=False)
+        mapped_raw = mapped_raw[non_empty_card_type & not_code_card].copy()
 
-# For TCGCSV product exports, keep likely physical cards and exclude code card listings.
-if "extCardType" in raw.columns:
-    non_empty_card_type = raw["extCardType"].astype(str).str.strip().ne("")
-    not_code_card = ~mapped_raw["card_name"].astype(str).str.contains("code card", case=False, na=False)
-    mapped_raw = mapped_raw[non_empty_card_type & not_code_card].copy()
+    needs_price_enrichment = "price" not in mapped_raw.columns or mapped_raw["price"].isna().all()
+    if needs_price_enrichment and "tcgplayer_id" in mapped_raw.columns:
+        if has_api_credentials():
+            with st.spinner("Fetching live prices from TCGplayer API..."):
+                mapped_raw = enrich_catalog_with_prices(mapped_raw)
+            if mapped_raw.empty or mapped_raw["price"].isna().all():
+                st.error("Could not fetch prices for this catalog CSV. Check your API credentials.")
+                st.stop()
+            st.info("Catalog rows were enriched with live TCGplayer prices.")
+        else:
+            public_only = bool(get_env("TCGPLAYER_PUBLIC_KEY") or get_env("TCGPLAYER_API_KEY"))
+            if public_only:
+                st.error(
+                    "This CSV has no prices. Your public key is set, but "
+                    "TCGPLAYER_PRIVATE_KEY is missing in .env."
+                )
+            else:
+                st.error(
+                    "This CSV has no price column. Add TCGPLAYER_PUBLIC_KEY and "
+                    "TCGPLAYER_PRIVATE_KEY to .env to fetch prices automatically."
+                )
+            st.stop()
+else:
+    if not has_api_credentials():
+        st.error("Add TCGPLAYER_PUBLIC_KEY and TCGPLAYER_PRIVATE_KEY to your .env file.")
+        st.stop()
+
+    if st.button("Fetch Pokemon prices now", type="primary"):
+        with st.spinner("Fetching Pokemon catalog and prices from TCGplayer..."):
+            try:
+                mapped_raw = fetch_pokemon_prices_snapshot(limit=api_limit)
+                st.session_state["api_snapshot"] = mapped_raw
+            except Exception as exc:
+                st.error(f"API fetch failed: {exc}")
+                st.stop()
+
+    mapped_raw = st.session_state.get("api_snapshot", pd.DataFrame())
+    if mapped_raw.empty:
+        st.info("Click **Fetch Pokemon prices now** in the sidebar to load data.")
+        st.stop()
+    raw = mapped_raw.copy()
 
 missing = validate_columns(mapped_raw)
 if missing:

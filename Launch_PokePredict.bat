@@ -35,10 +35,6 @@ if errorlevel 1 (
   exit /b 1
 )
 
-echo.
-echo Opening app in your browser...
-start "" "http://localhost:8501"
-
 echo Starting server (leave this window open while app is running)...
 ".venv\Scripts\python.exe" run_app.py
 

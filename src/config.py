@@ -11,6 +11,7 @@ REQUIRED_COLUMNS = [
 OPTIONAL_COLUMNS = [
     "variant",
     "expansion_code",
+    "tcgplayer_id",
 ]
 
 VALID_GRANULARITIES = {"daily", "weekly"}

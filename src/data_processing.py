@@ -7,8 +7,11 @@ import re
 from .config import OPTIONAL_COLUMNS, REQUIRED_COLUMNS
 
 
-def validate_columns(df: pd.DataFrame) -> list[str]:
-    missing = [col for col in REQUIRED_COLUMNS if col not in df.columns]
+def validate_columns(df: pd.DataFrame, *, require_price: bool = True) -> list[str]:
+    required = list(REQUIRED_COLUMNS)
+    if not require_price and "price" in required:
+        required.remove("price")
+    missing = [col for col in required if col not in df.columns]
     return missing
 
 
@@ -46,13 +49,15 @@ def map_alias_schema(df: pd.DataFrame) -> pd.DataFrame:
     """
     alias_map = {
         "date": ["date", "datetime", "timestamp", "modifiedOn", "updated_at"],
-        "card_name": ["card_name", "name", "product_name", "title"],
-        "set_name": ["set_name", "set", "expansion", "setCode", "group_name"],
-        "card_number": ["card_number", "number", "collector_number", "extNumber"],
+        "card_name": ["card_name", "name", "product_name", "title", "Name"],
+        "set_name": ["set_name", "set", "expansion", "setCode", "group_name", "Expansion"],
+        "card_number": ["card_number", "number", "collector_number", "extNumber", "Number"],
         "condition": ["condition", "subTypeName", "card_condition"],
         "price": ["price", "marketPrice", "market_price", "midPrice", "last_sold_price"],
-        "variant": ["variant", "extRarity", "rarity", "print_variant"],
-        "expansion_code": ["expansion_code", "set_code", "groupId"],
+        "variant": ["variant", "extRarity", "rarity", "print_variant", "Rarity"],
+        "expansion_code": ["expansion_code", "set_code", "groupId", "Expansion Code"],
+        "tcgplayer_id": ["tcgplayer_id", "TCGPlayer ID", "productId", "product_id"],
+        "game": ["game", "Game", "category", "tcg"],
     }
 
     work = df.copy()
@@ -77,6 +82,41 @@ def map_alias_schema(df: pd.DataFrame) -> pd.DataFrame:
     if "condition" not in work.columns:
         work["condition"] = "normal"
 
+    return work
+
+
+def map_pokemon_catalog_schema(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalize catalog-style exports that list cards without prices or dates.
+    """
+    work = df.copy()
+    catalog_markers = {"Name", "Expansion", "Game", "Number", "TCGPlayer ID"}
+    is_catalog = bool(catalog_markers.intersection(work.columns)) or (
+        {"card_name", "set_name", "tcgplayer_id"}.issubset(work.columns)
+        and "price" not in work.columns
+    )
+    if not is_catalog:
+        return work
+
+    if "game" in work.columns:
+        work = work[work["game"].astype(str).str.strip().str.lower() == "pokemon"].copy()
+
+    if "variant" in work.columns:
+        work = work[work["variant"].astype(str).str.strip().str.lower() != "sealed"].copy()
+
+    if "date" not in work.columns:
+        work["date"] = pd.Timestamp.utcnow().normalize()
+
+    if "condition" not in work.columns:
+        work["condition"] = "normal"
+
+    return work
+
+
+def normalize_csv_schema(df: pd.DataFrame) -> pd.DataFrame:
+    work = map_alias_schema(df)
+    work = map_tcgcsv_schema(work)
+    work = map_pokemon_catalog_schema(work)
     return work
 
 
@@ -171,8 +211,11 @@ def looks_like_pokemon_card_row(df: pd.DataFrame) -> pd.Series:
 
 
 def prepare_data(df: pd.DataFrame, *, pokemon_only: bool = True) -> pd.DataFrame:
-    df = map_alias_schema(df)
-    df = map_tcgcsv_schema(df)
+    df = normalize_csv_schema(df)
+
+    if "price" not in df.columns:
+        df = df.copy()
+        df["price"] = pd.NA
 
     # Keep only expected columns plus known optional fields.
     keep_cols = [c for c in REQUIRED_COLUMNS + OPTIONAL_COLUMNS if c in df.columns]
@@ -189,9 +232,14 @@ def prepare_data(df: pd.DataFrame, *, pokemon_only: bool = True) -> pd.DataFrame
     work["card_number"] = work["card_number"].astype(str).str.strip()
 
     work = work.dropna(subset=["date", "price", "card_name", "set_name", "condition"])
+    if work.empty:
+        return work
+
     work = work[work["price"] > 0]
     work = work[work["card_number"].apply(has_valid_card_number)]
     work = work[~work["card_name"].str.contains("box", case=False, na=False)]
+    if work.empty:
+        return work
 
     work["variant"] = build_variant_column(work)
 
